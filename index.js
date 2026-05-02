@@ -35,9 +35,9 @@ async function resolveIsin(isin) {
     `https://query1.finance.yahoo.com/v1/finance/search?q=${isin}`,
     { headers: { "User-Agent": "Mozilla/5.0" }, timeout: 10000 }
   );
-  const symbol = data?.quotes?.[0]?.symbol;
-  if (!symbol) throw new Error("NOT_FOUND");
-  return symbol;
+  const symbols = (data?.quotes ?? []).map(q => q.symbol).filter(Boolean);
+  if (!symbols.length) throw new Error("NOT_FOUND");
+  return symbols;
 }
 
 async function getTickerData(ticker) {
@@ -132,8 +132,17 @@ bot.onText(/\/add (.+)/, async (msg, match) => {
 
   let ticker;
   try {
-    ticker = await resolveIsin(isin);
-    await getTickerData(ticker);
+    const candidates = await resolveIsin(isin);
+    for (const sym of candidates) {
+      try {
+        await getTickerData(sym);
+        ticker = sym;
+        break;
+      } catch (e) {
+        console.error(`[/add] ${isin} → ${sym} no usable:`, e.message);
+      }
+    }
+    if (!ticker) throw new Error("NO_USABLE_SYMBOL");
   } catch (e) {
     console.error("[/add] failed:", e.message);
     const text = e.message === "INVALID_ISIN"
