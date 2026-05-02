@@ -14,7 +14,11 @@ await mongoose.connect(MONGODB_URI);
 const userSchema = new mongoose.Schema({
   chatId: { type: Number, unique: true },
   username: String,
-  tickers: [String],
+  tickers: [{
+    _id: false,
+    isin:   { type: String, required: true },
+    ticker: { type: String, required: true },
+  }],
 });
 const User = mongoose.model("User", userSchema);
 
@@ -22,6 +26,20 @@ const User = mongoose.model("User", userSchema);
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
 // ─── Yahoo Finance ────────────────────────────────────────────────────────────
+const ISIN_RE = /^[A-Z]{2}[A-Z0-9]{9}\d$/;
+
+async function resolveIsin(isin) {
+  if (!ISIN_RE.test(isin)) throw new Error("INVALID_ISIN");
+
+  const { data } = await axios.get(
+    `https://query1.finance.yahoo.com/v1/finance/search?q=${isin}`,
+    { headers: { "User-Agent": "Mozilla/5.0" }, timeout: 10000 }
+  );
+  const symbol = data?.quotes?.[0]?.symbol;
+  if (!symbol) throw new Error("NOT_FOUND");
+  return symbol;
+}
+
 async function getTickerData(ticker) {
   const now = Math.floor(Date.now() / 1000);
   const oneYearAgo = now - 366 * 24 * 3600;
@@ -62,10 +80,10 @@ function formatBriefing(results) {
 
   for (const r of results) {
     if (r.error) {
-      msg += `❌ *${r.ticker}* — no se pudo obtener datos\n\n`;
+      msg += `❌ *${r.isin}* — no se pudo obtener datos\n\n`;
       continue;
     }
-    msg += `*${r.ticker}* · ${r.currentPrice.toFixed(2)} €\n`;
+    msg += `*${r.isin}* · ${r.currentPrice.toFixed(2)} €\n`;
     msg += `  Desde ATH:  ${emoji(r.athDropPct)} ${r.athDropPct.toFixed(2)}%\n`;
     msg += `  Semanal:    ${emoji(r.weekChangePct)} ${r.weekChangePct >= 0 ? "+" : ""}${r.weekChangePct.toFixed(2)}%\n\n`;
   }
@@ -76,11 +94,15 @@ function formatBriefing(results) {
 // ─── Enviar briefing a un usuario ─────────────────────────────────────────────
 async function sendBriefing(chatId, tickers) {
   if (!tickers.length) {
-    return bot.sendMessage(chatId, "No tienes fondos configurados. Usa /add TICKER para añadir uno.");
+    return bot.sendMessage(chatId, "No tienes fondos configurados. Usa /add ISIN para añadir uno.");
   }
 
   const results = await Promise.all(
-    tickers.map(t => getTickerData(t).catch(() => ({ ticker: t, error: true })))
+    tickers.map(t =>
+      getTickerData(t.ticker)
+        .then(r => ({ ...r, isin: t.isin }))
+        .catch(() => ({ ticker: t.ticker, isin: t.isin, error: true }))
+    )
   );
 
   await bot.sendMessage(chatId, formatBriefing(results), { parse_mode: "Markdown" });
@@ -97,8 +119,8 @@ bot.onText(/\/start/, async (msg) => {
   bot.sendMessage(chatId,
     `👋 Hola! Soy tu bot de briefing DCA.\n\n` +
     `Comandos disponibles:\n` +
-    `/add TICKER — añadir fondo (ej: /add IWDA.AS)\n` +
-    `/remove TICKER — eliminar fondo\n` +
+    `/add ISIN — añadir fondo (ej: /add IE00BYX5NX33)\n` +
+    `/remove ISIN — eliminar fondo\n` +
     `/list — ver tus fondos\n` +
     `/briefing — recibir briefing ahora`
   );
@@ -106,37 +128,42 @@ bot.onText(/\/start/, async (msg) => {
 
 bot.onText(/\/add (.+)/, async (msg, match) => {
   const chatId = msg.chat.id;
-  const ticker = match[1].trim().toUpperCase();
+  const isin = match[1].trim().toUpperCase();
 
-  // Validar que existe en Yahoo Finance
+  let ticker;
   try {
+    ticker = await resolveIsin(isin);
     await getTickerData(ticker);
-  } catch {
-    return bot.sendMessage(chatId, `❌ No encontré el ticker *${ticker}* en Yahoo Finance. Revisa que sea correcto.`, { parse_mode: "Markdown" });
+  } catch (e) {
+    console.error("[/add] failed:", e.message);
+    const text = e.message === "INVALID_ISIN"
+      ? `❌ *${isin}* no parece un ISIN válido (formato: 2 letras + 9 alfanum + 1 dígito).`
+      : `❌ No encontré el ISIN *${isin}* en Yahoo Finance. Revisa que sea correcto.`;
+    return bot.sendMessage(chatId, text, { parse_mode: "Markdown" });
   }
 
   await User.findOneAndUpdate(
     { chatId },
-    { $addToSet: { tickers: ticker }, $setOnInsert: { username: msg.from.username } },
+    { $addToSet: { tickers: { isin, ticker } }, $setOnInsert: { username: msg.from.username } },
     { upsert: true }
   );
-  bot.sendMessage(chatId, `✅ *${ticker}* añadido a tu lista.`, { parse_mode: "Markdown" });
+  bot.sendMessage(chatId, `✅ *${isin}* (${ticker}) añadido a tu lista.`, { parse_mode: "Markdown" });
 });
 
 bot.onText(/\/remove (.+)/, async (msg, match) => {
   const chatId = msg.chat.id;
-  const ticker = match[1].trim().toUpperCase();
-  await User.findOneAndUpdate({ chatId }, { $pull: { tickers: ticker } });
-  bot.sendMessage(chatId, `🗑 *${ticker}* eliminado.`, { parse_mode: "Markdown" });
+  const isin = match[1].trim().toUpperCase();
+  await User.findOneAndUpdate({ chatId }, { $pull: { tickers: { isin } } });
+  bot.sendMessage(chatId, `🗑 *${isin}* eliminado.`, { parse_mode: "Markdown" });
 });
 
 bot.onText(/\/list/, async (msg) => {
   const chatId = msg.chat.id;
   const user = await User.findOne({ chatId });
   if (!user?.tickers.length) {
-    return bot.sendMessage(chatId, "No tienes fondos configurados. Usa /add TICKER.");
+    return bot.sendMessage(chatId, "No tienes fondos configurados. Usa /add ISIN.");
   }
-  bot.sendMessage(chatId, `📋 Tus fondos:\n${user.tickers.map(t => `• ${t}`).join("\n")}`);
+  bot.sendMessage(chatId, `📋 Tus fondos:\n${user.tickers.map(t => `• ${t.isin} (${t.ticker})`).join("\n")}`);
 });
 
 bot.onText(/\/briefing/, async (msg) => {
