@@ -80,6 +80,8 @@ function formatBriefing(results) {
 
   for (const r of results) {
     if (r.error) {
+      console.error(`Error obteniendo datos para ${r.isin} (${r.ticker})`);
+      console.error(r.error);
       msg += `❌ *${r.isin}* — no se pudo obtener datos\n\n`;
       continue;
     }
