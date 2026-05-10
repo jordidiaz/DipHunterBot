@@ -6,7 +6,7 @@ import cron from "node-cron";
 // ─── Config ───────────────────────────────────────────────────────────────────
 const BOT_TOKEN   = process.env.BOT_TOKEN;
 const MONGODB_URI = process.env.MONGODB_URI;
-const CRON_TIME   = process.env.CRON_TIME || "0 7 * * 1-7"; // Lunes-domingo 7:00 UTC
+const CRON_TIME   = process.env.CRON_TIME || "0 7 * * 0"; // Domingos 7:00 UTC
 
 // ─── MongoDB ──────────────────────────────────────────────────────────────────
 await mongoose.connect(MONGODB_URI);
